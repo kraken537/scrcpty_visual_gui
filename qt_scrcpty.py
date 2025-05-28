@@ -8,11 +8,13 @@ This application provides a user-friendly interface for:
 - Launching DroidCam for using phone as webcam
 - Managing both processes independently
 - Automatic scrcpy installation check
+- Phone IP address detection
 
 Requirements:
 - PyQt5
 - scrcpy installed and available in PATH (or auto-download)
 - DroidCam installed and available in PATH (optional)
+- adb for IP detection
 
 Author: Your Name
 License: MIT
@@ -26,6 +28,7 @@ import urllib.request
 import zipfile
 import tarfile
 import shutil
+import re
 from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QTextEdit, 
@@ -53,38 +56,38 @@ class ScrcpyDownloader(QThread):
                 url = "https://github.com/Genymobile/scrcpy/releases/latest/download/scrcpy-win64.zip"
                 filename = "scrcpy-win64.zip"
             elif self.system == 'linux':
-                self.status.emit("Na Linuxie zalecamy instalację przez menedżer pakietów:\n"
+                self.status.emit("On Linux, we recommend installing via package manager:\n"
                                "Ubuntu/Debian: sudo apt install scrcpy\n"
                                "Fedora: sudo dnf install scrcpy\n"
                                "Arch: sudo pacman -S scrcpy")
                 self.finished.emit(False)
                 return
             elif self.system == 'darwin':
-                self.status.emit("Na macOS zalecamy instalację przez Homebrew:\n"
+                self.status.emit("On macOS, we recommend installing via Homebrew:\n"
                                "brew install scrcpy")
                 self.finished.emit(False)
                 return
             else:
-                self.status.emit("Nieobsługiwany system operacyjny")
+                self.status.emit("Unsupported operating system")
                 self.finished.emit(False)
                 return
                 
             # Download scrcpy
-            self.status.emit(f"Pobieranie {filename}...")
+            self.status.emit(f"Downloading {filename}...")
             self.download_file(url, filename)
             
             # Extract
-            self.status.emit("Rozpakowywanie...")
+            self.status.emit("Extracting...")
             self.extract_file(filename)
             
             # Add to PATH or move to appropriate location
-            self.status.emit("Konfigurowanie...")
+            self.status.emit("Configuring...")
             self.configure_scrcpy()
             
             self.finished.emit(True)
             
         except Exception as e:
-            self.status.emit(f"Błąd: {str(e)}")
+            self.status.emit(f"Error: {str(e)}")
             self.finished.emit(False)
     
     def download_file(self, url, filename):
@@ -117,7 +120,76 @@ class ScrcpyDownloader(QThread):
         """Configure scrcpy after extraction"""
         # This would need system-specific configuration
         # For now, just inform user
-        self.status.emit("Scrcpy pobrane. Dodaj folder scrcpy do PATH.")
+        self.status.emit("Scrcpy downloaded. Please add the scrcpy folder to PATH.")
+
+class PhoneIPDetector(QThread):
+    """Thread for detecting phone IP address via adb"""
+    ip_found = pyqtSignal(str)
+    error = pyqtSignal(str)
+    status = pyqtSignal(str)
+    
+    def run(self):
+        try:
+            # Check if adb is available
+            self.status.emit("Checking for connected devices...")
+            result = subprocess.run(['adb', 'devices'], 
+                                  capture_output=True, text=True, timeout=5)
+            
+            if result.returncode != 0:
+                self.error.emit("ADB not found. Make sure it's installed and in PATH.")
+                return
+            
+            # Check if any device is connected
+            lines = result.stdout.strip().split('\n')
+            if len(lines) <= 1 or not any('device' in line for line in lines[1:]):
+                self.error.emit("No Android device connected via USB.")
+                return
+            
+            # Try to get IP address - method 1: ip addr show
+            self.status.emit("Getting device IP address...")
+            result = subprocess.run(['adb', 'shell', 'ip', 'addr', 'show', 'wlan0'], 
+                                  capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0:
+                # Parse IP address from output
+                ip_pattern = r'inet\s+(\d+\.\d+\.\d+\.\d+)'
+                match = re.search(ip_pattern, result.stdout)
+                if match:
+                    ip = match.group(1)
+                    self.ip_found.emit(ip)
+                    return
+            
+            # Try method 2: ifconfig
+            result = subprocess.run(['adb', 'shell', 'ifconfig', 'wlan0'], 
+                                  capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0:
+                # Parse IP address from ifconfig output
+                ip_pattern = r'inet addr:(\d+\.\d+\.\d+\.\d+)'
+                match = re.search(ip_pattern, result.stdout)
+                if match:
+                    ip = match.group(1)
+                    self.ip_found.emit(ip)
+                    return
+            
+            # Try method 3: getprop
+            result = subprocess.run(['adb', 'shell', 'getprop', 'dhcp.wlan0.ipaddress'], 
+                                  capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                ip = result.stdout.strip()
+                if re.match(r'\d+\.\d+\.\d+\.\d+', ip):
+                    self.ip_found.emit(ip)
+                    return
+            
+            self.error.emit("Could not detect phone IP address. Make sure WiFi is enabled.")
+            
+        except subprocess.TimeoutExpired:
+            self.error.emit("ADB command timed out.")
+        except FileNotFoundError:
+            self.error.emit("ADB not found. Please install Android Debug Bridge.")
+        except Exception as e:
+            self.error.emit(f"Error detecting IP: {str(e)}")
 
 class ScrcpyLauncher(QMainWindow):
     """
@@ -132,6 +204,7 @@ class ScrcpyLauncher(QMainWindow):
         super().__init__()
         self.scrcpy_process = None      # QProcess for scrcpy
         self.droidcam_process = None    # QProcess for droidcam
+        self.ip_detector = None         # Thread for IP detection
         self.init_ui()
         
         # Check scrcpy installation on startup
@@ -144,7 +217,7 @@ class ScrcpyLauncher(QMainWindow):
         self.setGeometry(100, 100, 750, 850)
         
         # Modern color scheme with high contrast for readability
-        # NAPRAWIONO: Usunięto właściwość 'transform' która powodowała błędy
+        # FIXED: Removed 'transform' property that was causing errors
         self.setStyleSheet("""
             /* Main window background */
             QMainWindow {
@@ -401,14 +474,14 @@ class ScrcpyLauncher(QMainWindow):
         scroll_layout.setSpacing(15)
         
         # Basic Options Group
-        basic_group = QGroupBox("⚙️ Podstawowe opcje")
+        basic_group = QGroupBox("⚙️ Basic Options")
         basic_layout = QGridLayout()
         basic_layout.setSpacing(8)
         
-        self.scrcpy_fullscreen = QCheckBox("Tryb pełnoekranowy (-f)")
-        self.scrcpy_stay_awake = QCheckBox("Utrzymuj urządzenie włączone (-w)")
-        self.scrcpy_show_touches = QCheckBox("Pokazuj dotknięcia palcem (-t)")
-        self.scrcpy_disable_screensaver = QCheckBox("Wyłącz wygaszacz ekranu (-S)")
+        self.scrcpy_fullscreen = QCheckBox("Fullscreen mode (-f)")
+        self.scrcpy_stay_awake = QCheckBox("Keep device awake (-w)")
+        self.scrcpy_show_touches = QCheckBox("Show finger touches (-t)")
+        self.scrcpy_disable_screensaver = QCheckBox("Disable screensaver (-S)")
         
         basic_layout.addWidget(self.scrcpy_fullscreen, 0, 0)
         basic_layout.addWidget(self.scrcpy_stay_awake, 0, 1)
@@ -417,14 +490,14 @@ class ScrcpyLauncher(QMainWindow):
         basic_group.setLayout(basic_layout)
         
         # Display Options Group
-        display_group = QGroupBox("🖥️ Opcje wyświetlania")
+        display_group = QGroupBox("🖥️ Display Options")
         display_layout = QGridLayout()
         display_layout.setSpacing(8)
         
-        self.scrcpy_borderless = QCheckBox("Okno bez ramki (-b)")
-        self.scrcpy_always_on_top = QCheckBox("Zawsze na wierzchu (-T)")
-        self.scrcpy_turn_screen_off = QCheckBox("Wyłącz ekran urządzenia (-o)")
-        self.scrcpy_no_audio = QCheckBox("Wyłącz dźwięk (--no-audio)")
+        self.scrcpy_borderless = QCheckBox("Borderless window (-b)")
+        self.scrcpy_always_on_top = QCheckBox("Always on top (-T)")
+        self.scrcpy_turn_screen_off = QCheckBox("Turn device screen off (-o)")
+        self.scrcpy_no_audio = QCheckBox("Disable audio (--no-audio)")
         
         display_layout.addWidget(self.scrcpy_borderless, 0, 0)
         display_layout.addWidget(self.scrcpy_always_on_top, 0, 1)
@@ -433,23 +506,23 @@ class ScrcpyLauncher(QMainWindow):
         display_group.setLayout(display_layout)
         
         # Performance Options Group
-        performance_group = QGroupBox("⚡ Ustawienia wydajności")
+        performance_group = QGroupBox("⚡ Performance Settings")
         performance_layout = QGridLayout()
         performance_layout.setSpacing(8)
         
         # Video codec selection
-        performance_layout.addWidget(QLabel("Kodek wideo:"), 0, 0)
+        performance_layout.addWidget(QLabel("Video codec:"), 0, 0)
         self.scrcpy_video_codec = QComboBox()
-        self.scrcpy_video_codec.addItems(["domyślny", "h264", "h265", "av1"])
+        self.scrcpy_video_codec.addItems(["default", "h264", "h265", "av1"])
         performance_layout.addWidget(self.scrcpy_video_codec, 0, 1)
         
-        self.scrcpy_max_fps = QCheckBox("Ogranicz FPS:")
+        self.scrcpy_max_fps = QCheckBox("Limit FPS:")
         self.scrcpy_fps_value = QSpinBox()
         self.scrcpy_fps_value.setRange(1, 120)
         self.scrcpy_fps_value.setValue(60)
         self.scrcpy_fps_value.setSuffix(" fps")
         
-        self.scrcpy_max_size = QCheckBox("Maks. rozdzielczość:")
+        self.scrcpy_max_size = QCheckBox("Max resolution:")
         self.scrcpy_size_value = QSpinBox()
         self.scrcpy_size_value.setRange(480, 4000)
         self.scrcpy_size_value.setValue(1920)
@@ -470,22 +543,22 @@ class ScrcpyLauncher(QMainWindow):
         performance_group.setLayout(performance_layout)
         
         # Control Options Group
-        control_group = QGroupBox("🎮 Kontrola wejścia")
+        control_group = QGroupBox("🎮 Input Control")
         control_layout = QGridLayout()
         control_layout.setSpacing(8)
         
-        self.scrcpy_mouse_control = QCheckBox("Kontrola myszą (-M)")
+        self.scrcpy_mouse_control = QCheckBox("Mouse control (-M)")
         self.scrcpy_mouse_control.setChecked(True)
         
-        self.scrcpy_keyboard_control = QCheckBox("Kontrola klawiaturą (-K)")
+        self.scrcpy_keyboard_control = QCheckBox("Keyboard control (-K)")
         self.scrcpy_keyboard_control.setChecked(True)
         
-        self.scrcpy_no_control = QCheckBox("Tylko wyświetlanie, bez kontroli (-n)")
+        self.scrcpy_no_control = QCheckBox("Display only, no control (-n)")
         
         # Keyboard mode selection
-        control_layout.addWidget(QLabel("Tryb klawiatury:"), 2, 0)
+        control_layout.addWidget(QLabel("Keyboard mode:"), 2, 0)
         self.scrcpy_keyboard_mode = QComboBox()
-        self.scrcpy_keyboard_mode.addItems(["domyślny", "uhid", "aoa"])
+        self.scrcpy_keyboard_mode.addItems(["default", "uhid", "aoa"])
         control_layout.addWidget(self.scrcpy_keyboard_mode, 2, 1)
         
         control_layout.addWidget(self.scrcpy_mouse_control, 0, 0)
@@ -494,34 +567,34 @@ class ScrcpyLauncher(QMainWindow):
         control_group.setLayout(control_layout)
         
         # Advanced Options Group
-        advanced_group = QGroupBox("🔧 Opcje zaawansowane")
+        advanced_group = QGroupBox("🔧 Advanced Options")
         advanced_layout = QGridLayout()
         advanced_layout.setSpacing(8)
         
         # Recording
-        self.scrcpy_record = QCheckBox("Nagrywaj do pliku:")
+        self.scrcpy_record = QCheckBox("Record to file:")
         self.scrcpy_record_filename = QLineEdit("recording.mp4")
-        self.scrcpy_record_filename.setPlaceholderText("nazwa_pliku.mp4")
+        self.scrcpy_record_filename.setPlaceholderText("filename.mp4")
         
         # Video source
-        advanced_layout.addWidget(QLabel("Źródło wideo:"), 1, 0)
+        advanced_layout.addWidget(QLabel("Video source:"), 1, 0)
         self.scrcpy_video_source = QComboBox()
-        self.scrcpy_video_source.addItems(["ekran", "kamera"])
+        self.scrcpy_video_source.addItems(["display", "camera"])
         advanced_layout.addWidget(self.scrcpy_video_source, 1, 1)
         
         # TCP/IP connection
-        self.scrcpy_tcpip = QCheckBox("Połączenie TCP/IP:")
+        self.scrcpy_tcpip = QCheckBox("TCP/IP connection:")
         self.scrcpy_tcpip_address = QLineEdit()
         self.scrcpy_tcpip_address.setPlaceholderText("192.168.1.100:5555")
         
         # Screen timeout
-        self.scrcpy_screen_timeout = QCheckBox("Timeout ekranu (s):")
+        self.scrcpy_screen_timeout = QCheckBox("Screen timeout (s):")
         self.scrcpy_timeout_value = QSpinBox()
         self.scrcpy_timeout_value.setRange(0, 3600)
         self.scrcpy_timeout_value.setValue(300)
         
         # Orientation lock
-        advanced_layout.addWidget(QLabel("Blokada orientacji:"), 4, 0)
+        advanced_layout.addWidget(QLabel("Orientation lock:"), 4, 0)
         self.scrcpy_orientation = QComboBox()
         self.scrcpy_orientation.addItems(["auto", "0°", "90°", "180°", "270°"])
         advanced_layout.addWidget(self.scrcpy_orientation, 4, 1)
@@ -535,12 +608,12 @@ class ScrcpyLauncher(QMainWindow):
         advanced_group.setLayout(advanced_layout)
         
         # Custom parameters group
-        custom_group = QGroupBox("✏️ Parametry własne")
+        custom_group = QGroupBox("✏️ Custom Parameters")
         custom_layout = QVBoxLayout()
         
-        custom_label = QLabel("Dodatkowe parametry (opcjonalne):")
+        custom_label = QLabel("Additional parameters (optional):")
         self.scrcpy_custom_params = QLineEdit()
-        self.scrcpy_custom_params.setPlaceholderText("np. --prefer-text --legacy-paste")
+        self.scrcpy_custom_params.setPlaceholderText("e.g. --prefer-text --legacy-paste")
         
         custom_layout.addWidget(custom_label)
         custom_layout.addWidget(self.scrcpy_custom_params)
@@ -563,7 +636,7 @@ class ScrcpyLauncher(QMainWindow):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
         
-        self.scrcpy_start_button = QPushButton('▶️ URUCHOM SCRCPY')
+        self.scrcpy_start_button = QPushButton('▶️ START SCRCPY')
         self.scrcpy_start_button.clicked.connect(self.start_scrcpy)
         self.scrcpy_start_button.setMinimumHeight(50)
         self.scrcpy_start_button.setStyleSheet("""
@@ -580,7 +653,7 @@ class ScrcpyLauncher(QMainWindow):
             }
         """)
         
-        self.scrcpy_stop_button = QPushButton('⏹️ ZATRZYMAJ SCRCPY')
+        self.scrcpy_stop_button = QPushButton('⏹️ STOP SCRCPY')
         self.scrcpy_stop_button.clicked.connect(self.stop_scrcpy)
         self.scrcpy_stop_button.setMinimumHeight(50)
         self.scrcpy_stop_button.setEnabled(False)
@@ -603,7 +676,7 @@ class ScrcpyLauncher(QMainWindow):
         layout.addLayout(button_layout)
         
         # Command preview
-        self.scrcpy_command_label = QLabel("Komenda: scrcpy")
+        self.scrcpy_command_label = QLabel("Command: scrcpy")
         self.scrcpy_command_label.setStyleSheet("""
             color: #5f6368; 
             margin: 10px; 
@@ -634,6 +707,40 @@ class ScrcpyLauncher(QMainWindow):
         layout = QVBoxLayout()
         layout.setSpacing(20)
         
+        # Phone IP detection section
+        ip_group = QGroupBox("🌐 Phone IP Address")
+        ip_layout = QVBoxLayout()
+        
+        self.ip_label = QLabel("Phone IP: Not detected")
+        self.ip_label.setFont(QFont('Segoe UI', 14, QFont.Bold))
+        self.ip_label.setStyleSheet("color: #1565c0; margin: 10px;")
+        
+        detect_button = QPushButton("🔍 Detect Phone IP (via USB)")
+        detect_button.clicked.connect(self.detect_phone_ip)
+        detect_button.setStyleSheet("""
+            QPushButton {
+                background-color: #1976d2;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #1565c0;
+            }
+        """)
+        
+        ip_info = QLabel("""
+<i>Connect your phone via USB with USB debugging enabled.<br>
+Make sure your phone is connected to the same WiFi network.</i>
+        """)
+        ip_info.setStyleSheet("color: #666; font-size: 11px; margin: 5px;")
+        ip_info.setWordWrap(True)
+        
+        ip_layout.addWidget(self.ip_label)
+        ip_layout.addWidget(detect_button)
+        ip_layout.addWidget(ip_info)
+        ip_group.setLayout(ip_layout)
+        
+        layout.addWidget(ip_group)
+        
         # Information about DroidCam
         info_container = QWidget()
         info_container.setStyleSheet("""
@@ -645,22 +752,22 @@ class ScrcpyLauncher(QMainWindow):
         """)
         info_layout = QVBoxLayout()
         
-        info_title = QLabel("📷 DroidCam - Użyj telefonu jako kamery internetowej")
+        info_title = QLabel("📷 DroidCam - Use Your Phone as Webcam")
         info_title.setFont(QFont('Segoe UI', 16, QFont.Bold))
         info_title.setStyleSheet("color: #2e7d32; margin: 5px;")
         
         info_text = QLabel("""
-<b>Przed użyciem DroidCam upewnij się, że:</b><br>
-• DroidCam jest zainstalowany na komputerze i telefonie<br>
-• Telefon i komputer są w tej samej sieci WiFi<br>
-• Aplikacja DroidCam jest uruchomiona na telefonie<br>
-• Twój telefon pokazuje adres IP i port<br><br>
+<b>Before using DroidCam, make sure:</b><br>
+• DroidCam is installed on both computer and phone<br>
+• Phone and computer are on the same WiFi network<br>
+• DroidCam app is running on your phone<br>
+• Your phone shows the IP address and port<br><br>
 
-<b>Jak używać:</b><br>
-1. Otwórz aplikację DroidCam na telefonie<br>
-2. Zanotuj pokazany adres IP (np. 192.168.1.100)<br>
-3. Kliknij "URUCHOM DROIDCAM" poniżej<br>
-4. Wprowadź adres IP gdy zostaniesz poproszony<br>
+<b>How to use:</b><br>
+1. Open DroidCam app on your phone<br>
+2. Note the IP address shown (e.g., 192.168.1.100)<br>
+3. Click "START DROIDCAM" below<br>
+4. Enter the IP address when prompted<br>
         """)
         info_text.setStyleSheet("""
             color: #1b5e20; 
@@ -681,7 +788,7 @@ class ScrcpyLauncher(QMainWindow):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
         
-        self.droidcam_start_button = QPushButton('▶️ URUCHOM DROIDCAM')
+        self.droidcam_start_button = QPushButton('▶️ START DROIDCAM')
         self.droidcam_start_button.clicked.connect(self.start_droidcam)
         self.droidcam_start_button.setMinimumHeight(50)
         self.droidcam_start_button.setStyleSheet("""
@@ -698,7 +805,7 @@ class ScrcpyLauncher(QMainWindow):
             }
         """)
         
-        self.droidcam_stop_button = QPushButton('⏹️ ZATRZYMAJ DROIDCAM')
+        self.droidcam_stop_button = QPushButton('⏹️ STOP DROIDCAM')
         self.droidcam_stop_button.clicked.connect(self.stop_droidcam)
         self.droidcam_stop_button.setMinimumHeight(50)
         self.droidcam_stop_button.setEnabled(False)
@@ -724,6 +831,37 @@ class ScrcpyLauncher(QMainWindow):
         tab.setLayout(layout)
         return tab
     
+    def detect_phone_ip(self):
+        """Start phone IP detection via ADB"""
+        if self.ip_detector and self.ip_detector.isRunning():
+            self.log_text.append("⚠️ IP detection already in progress...")
+            return
+        
+        self.ip_label.setText("Phone IP: Detecting...")
+        self.log_text.append("🔍 Starting IP detection via ADB...")
+        
+        # Create and start IP detector thread
+        self.ip_detector = PhoneIPDetector()
+        self.ip_detector.ip_found.connect(self.on_ip_detected)
+        self.ip_detector.error.connect(self.on_ip_error)
+        self.ip_detector.status.connect(lambda s: self.log_text.append(f"📡 {s}"))
+        self.ip_detector.start()
+    
+    def on_ip_detected(self, ip):
+        """Handle successful IP detection"""
+        self.ip_label.setText(f"Phone IP: {ip}")
+        self.ip_label.setStyleSheet("color: #2e7d32; margin: 10px; font-weight: bold;")
+        self.log_text.append(f"✅ Phone IP detected: {ip}")
+        
+        # Automatically set the IP in scrcpy TCP/IP field
+        self.scrcpy_tcpip_address.setText(f"{ip}:5555")
+        
+    def on_ip_error(self, error):
+        """Handle IP detection error"""
+        self.ip_label.setText("Phone IP: Detection failed")
+        self.ip_label.setStyleSheet("color: #d32f2f; margin: 10px; font-weight: bold;")
+        self.log_text.append(f"❌ IP detection error: {error}")
+    
     def create_status_section(self, layout):
         """
         Create the status and logs section at the bottom of the window
@@ -732,7 +870,7 @@ class ScrcpyLauncher(QMainWindow):
             layout: Parent layout to add the status section to
         """
         # Status indicator
-        self.status_label = QLabel('✅ Gotowy do uruchomienia aplikacji')
+        self.status_label = QLabel('✅ Ready to launch applications')
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setStyleSheet("""
             color: #34a853; 
@@ -747,14 +885,14 @@ class ScrcpyLauncher(QMainWindow):
         layout.addWidget(self.status_label)
         
         # Logs section
-        log_label = QLabel('📝 Logi aktywności:')
+        log_label = QLabel('📝 Activity Logs:')
         log_label.setStyleSheet("color: #1a73e8; font-weight: 600; margin-top: 10px;")
         layout.addWidget(log_label)
         
         self.log_text = QTextEdit()
         self.log_text.setMaximumHeight(100)
         self.log_text.setReadOnly(True)
-        self.log_text.setPlaceholderText("Logi aplikacji pojawią się tutaj...")
+        self.log_text.setPlaceholderText("Application logs will appear here...")
         layout.addWidget(self.log_text)
     
     def connect_scrcpy_checkboxes(self):
@@ -797,7 +935,7 @@ class ScrcpyLauncher(QMainWindow):
         """Update the displayed scrcpy command based on selected options"""
         command = self.get_scrcpy_command()
         command_str = ' '.join(command)
-        self.scrcpy_command_label.setText(f"Komenda: {command_str}")
+        self.scrcpy_command_label.setText(f"Command: {command_str}")
     
     def get_scrcpy_command(self):
         """
@@ -813,11 +951,11 @@ class ScrcpyLauncher(QMainWindow):
             command.append(f'--tcpip={self.scrcpy_tcpip_address.text()}')
         
         # Video codec
-        if self.scrcpy_video_codec.currentText() != "domyślny":
+        if self.scrcpy_video_codec.currentText() != "default":
             command.extend(['--video-codec', self.scrcpy_video_codec.currentText()])
         
         # Video source
-        if self.scrcpy_video_source.currentText() == "kamera":
+        if self.scrcpy_video_source.currentText() == "camera":
             command.append('--video-source=camera')
         
         # Control options
@@ -826,7 +964,7 @@ class ScrcpyLauncher(QMainWindow):
         if self.scrcpy_keyboard_control.isChecked():
             command.append('-K')
             # Keyboard mode
-            if self.scrcpy_keyboard_mode.currentText() != "domyślny":
+            if self.scrcpy_keyboard_mode.currentText() != "default":
                 command.append(f'--keyboard={self.scrcpy_keyboard_mode.currentText()}')
         if self.scrcpy_no_control.isChecked():
             command.append('-n')
@@ -891,9 +1029,9 @@ class ScrcpyLauncher(QMainWindow):
         if not self.check_scrcpy_available(silent=True):
             reply = QMessageBox.question(
                 self, 
-                'Scrcpy nie znalezione',
-                'Scrcpy nie jest zainstalowane lub nie jest dostępne w PATH.\n\n'
-                'Czy chcesz pobrać i zainstalować scrcpy automatycznie?',
+                'Scrcpy not found',
+                'Scrcpy is not installed or not available in PATH.\n\n'
+                'Would you like to download and install scrcpy automatically?',
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes
             )
@@ -906,7 +1044,7 @@ class ScrcpyLauncher(QMainWindow):
         self.downloader = ScrcpyDownloader()
         
         # Create progress dialog
-        self.progress_dialog = QProgressDialog("Pobieranie scrcpy...", "Anuluj", 0, 100, self)
+        self.progress_dialog = QProgressDialog("Downloading scrcpy...", "Cancel", 0, 100, self)
         self.progress_dialog.setWindowModality(Qt.WindowModal)
         self.progress_dialog.setAutoClose(True)
         
@@ -930,21 +1068,21 @@ class ScrcpyLauncher(QMainWindow):
         if success:
             QMessageBox.information(
                 self,
-                "Pobieranie zakończone",
-                "Scrcpy zostało pobrane pomyślnie.\n"
-                "Może być konieczne dodanie folderu scrcpy do zmiennej PATH."
+                "Download complete",
+                "Scrcpy has been downloaded successfully.\n"
+                "You may need to add the scrcpy folder to your PATH variable."
             )
         else:
             # Check if it was Linux/macOS with package manager instructions
-            if "menedżer pakietów" in self.log_text.toPlainText() or "Homebrew" in self.log_text.toPlainText():
+            if "package manager" in self.log_text.toPlainText() or "Homebrew" in self.log_text.toPlainText():
                 # Don't show error, instructions were already provided
                 pass
             else:
                 QMessageBox.warning(
                     self,
-                    "Błąd pobierania",
-                    "Nie udało się pobrać scrcpy.\n"
-                    "Sprawdź logi lub zainstaluj ręcznie."
+                    "Download error",
+                    "Failed to download scrcpy.\n"
+                    "Check the logs or install manually."
                 )
     
     def start_scrcpy(self):
@@ -968,7 +1106,7 @@ class ScrcpyLauncher(QMainWindow):
             # Update UI state
             self.scrcpy_start_button.setEnabled(False)
             self.scrcpy_stop_button.setEnabled(True)
-            self.status_label.setText('📱 Scrcpy działa...')
+            self.status_label.setText('📱 Scrcpy is running...')
             self.status_label.setStyleSheet("""
                 color: #1565c0; 
                 margin: 10px; 
@@ -981,11 +1119,11 @@ class ScrcpyLauncher(QMainWindow):
             """)
             
             # Log the action
-            self.log_text.append(f"🚀 Uruchamianie: {' '.join(command)}")
+            self.log_text.append(f"🚀 Starting: {' '.join(command)}")
             
         except Exception as e:
-            self.show_error(f"Błąd uruchamiania Scrcpy: {str(e)}")
-            self.log_text.append(f"❌ BŁĄD (Scrcpy): {str(e)}")
+            self.show_error(f"Error starting Scrcpy: {str(e)}")
+            self.log_text.append(f"❌ ERROR (Scrcpy): {str(e)}")
     
     def stop_scrcpy(self):
         """Stop the running scrcpy process"""
@@ -1000,7 +1138,7 @@ class ScrcpyLauncher(QMainWindow):
         self.scrcpy_start_button.setEnabled(True)
         self.scrcpy_stop_button.setEnabled(False)
         self.update_status()
-        self.log_text.append("⏹️ Scrcpy zatrzymane")
+        self.log_text.append("⏹️ Scrcpy stopped")
         self.scrcpy_process = None
     
     def on_scrcpy_error(self, error):
@@ -1011,17 +1149,17 @@ class ScrcpyLauncher(QMainWindow):
             error: QProcess error type
         """
         error_messages = {
-            QProcess.FailedToStart: "Nie udało się uruchomić scrcpy. Sprawdź czy jest zainstalowane i dostępne w PATH.",
-            QProcess.Crashed: "Scrcpy nieoczekiwanie przestało działać.",
-            QProcess.Timedout: "Scrcpy przekroczyło limit czasu.",
-            QProcess.WriteError: "Błąd zapisu do procesu scrcpy.",
-            QProcess.ReadError: "Błąd odczytu z procesu scrcpy.",
-            QProcess.UnknownError: "Nieznany błąd procesu scrcpy."
+            QProcess.FailedToStart: "Failed to start scrcpy. Check if it's installed and in PATH.",
+            QProcess.Crashed: "Scrcpy crashed unexpectedly.",
+            QProcess.Timedout: "Scrcpy timed out.",
+            QProcess.WriteError: "Write error to scrcpy process.",
+            QProcess.ReadError: "Read error from scrcpy process.",
+            QProcess.UnknownError: "Unknown error with scrcpy process."
         }
         
-        message = error_messages.get(error, "Wystąpił nieznany błąd")
-        self.show_error(f"Błąd Scrcpy: {message}")
-        self.log_text.append(f"❌ BŁĄD (Scrcpy): {message}")
+        message = error_messages.get(error, "Unknown error occurred")
+        self.show_error(f"Scrcpy Error: {message}")
+        self.log_text.append(f"❌ ERROR (Scrcpy): {message}")
         self.on_scrcpy_finished()
     
     def start_droidcam(self):
@@ -1031,12 +1169,20 @@ class ScrcpyLauncher(QMainWindow):
             if not self.check_droidcam_available():
                 return
             
+            # Get IP from the label if detected, otherwise ask
+            detected_ip = None
+            if "Phone IP:" in self.ip_label.text() and "Not detected" not in self.ip_label.text():
+                # Extract IP from label
+                ip_text = self.ip_label.text().replace("Phone IP: ", "").strip()
+                if re.match(r'\d+\.\d+\.\d+\.\d+', ip_text):
+                    detected_ip = ip_text
+            
             # Ask for IP address
             ip_address, ok = QInputDialog.getText(
                 self,
-                "Adres IP DroidCam",
-                "Wprowadź adres IP telefonu (widoczny w aplikacji DroidCam):",
-                text="192.168.1.100"
+                "DroidCam IP Address",
+                "Enter phone IP address (shown in DroidCam app):",
+                text=detected_ip if detected_ip else "192.168.1.100"
             )
             
             if not ok or not ip_address:
@@ -1059,7 +1205,7 @@ class ScrcpyLauncher(QMainWindow):
             # Update UI state
             self.droidcam_start_button.setEnabled(False)
             self.droidcam_stop_button.setEnabled(True)
-            self.status_label.setText('📷 DroidCam działa...')
+            self.status_label.setText('📷 DroidCam is running...')
             self.status_label.setStyleSheet("""
                 color: #f57c00; 
                 margin: 10px; 
@@ -1072,11 +1218,11 @@ class ScrcpyLauncher(QMainWindow):
             """)
             
             # Log the action
-            self.log_text.append(f"🚀 Uruchamianie DroidCam: {' '.join(command)}")
+            self.log_text.append(f"🚀 Starting DroidCam: {' '.join(command)}")
             
         except Exception as e:
-            self.show_error(f"Błąd uruchamiania DroidCam: {str(e)}")
-            self.log_text.append(f"❌ BŁĄD (DroidCam): {str(e)}")
+            self.show_error(f"Error starting DroidCam: {str(e)}")
+            self.log_text.append(f"❌ ERROR (DroidCam): {str(e)}")
     
     def stop_droidcam(self):
         """Stop the running DroidCam process"""
@@ -1091,7 +1237,7 @@ class ScrcpyLauncher(QMainWindow):
         self.droidcam_start_button.setEnabled(True)
         self.droidcam_stop_button.setEnabled(False)
         self.update_status()
-        self.log_text.append("⏹️ DroidCam zatrzymane")
+        self.log_text.append("⏹️ DroidCam stopped")
         self.droidcam_process = None
     
     def on_droidcam_error(self, error):
@@ -1102,23 +1248,23 @@ class ScrcpyLauncher(QMainWindow):
             error: QProcess error type
         """
         error_messages = {
-            QProcess.FailedToStart: "Nie udało się uruchomić DroidCam. Sprawdź czy jest zainstalowane i dostępne w PATH.",
-            QProcess.Crashed: "DroidCam nieoczekiwanie przestało działać.",
-            QProcess.Timedout: "DroidCam przekroczyło limit czasu.",
-            QProcess.WriteError: "Błąd zapisu do procesu DroidCam.",
-            QProcess.ReadError: "Błąd odczytu z procesu DroidCam.",
-            QProcess.UnknownError: "Nieznany błąd procesu DroidCam."
+            QProcess.FailedToStart: "Failed to start DroidCam. Check if it's installed and in PATH.",
+            QProcess.Crashed: "DroidCam crashed unexpectedly.",
+            QProcess.Timedout: "DroidCam timed out.",
+            QProcess.WriteError: "Write error to DroidCam process.",
+            QProcess.ReadError: "Read error from DroidCam process.",
+            QProcess.UnknownError: "Unknown error with DroidCam process."
         }
         
-        message = error_messages.get(error, "Wystąpił nieznany błąd")
-        self.show_error(f"Błąd DroidCam: {message}")
-        self.log_text.append(f"❌ BŁĄD (DroidCam): {message}")
+        message = error_messages.get(error, "Unknown error occurred")
+        self.show_error(f"DroidCam Error: {message}")
+        self.log_text.append(f"❌ ERROR (DroidCam): {message}")
         self.on_droidcam_finished()
     
     def update_status(self):
         """Update the status label based on running processes"""
         if self.scrcpy_process and self.droidcam_process:
-            self.status_label.setText('📱📷 Scrcpy i DroidCam działają')
+            self.status_label.setText('📱📷 Both Scrcpy and DroidCam are running')
             self.status_label.setStyleSheet("""
                 color: #7b1fb8; 
                 margin: 10px; 
@@ -1130,7 +1276,7 @@ class ScrcpyLauncher(QMainWindow):
                 border: 1px solid #e1bee7;
             """)
         elif self.scrcpy_process:
-            self.status_label.setText('📱 Scrcpy działa...')
+            self.status_label.setText('📱 Scrcpy is running...')
             self.status_label.setStyleSheet("""
                 color: #1565c0; 
                 margin: 10px; 
@@ -1142,7 +1288,7 @@ class ScrcpyLauncher(QMainWindow):
                 border: 1px solid #bbdefb;
             """)
         elif self.droidcam_process:
-            self.status_label.setText('📷 DroidCam działa...')
+            self.status_label.setText('📷 DroidCam is running...')
             self.status_label.setStyleSheet("""
                 color: #f57c00; 
                 margin: 10px; 
@@ -1154,7 +1300,7 @@ class ScrcpyLauncher(QMainWindow):
                 border: 1px solid #ffe0b2;
             """)
         else:
-            self.status_label.setText('✅ Gotowy do uruchomienia aplikacji')
+            self.status_label.setText('✅ Ready to launch applications')
             self.status_label.setStyleSheet("""
                 color: #34a853; 
                 margin: 10px; 
@@ -1183,12 +1329,12 @@ class ScrcpyLauncher(QMainWindow):
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
             if not silent:
                 self.show_error(
-                    "Scrcpy nie znalezione!\n\n"
-                    "Upewnij się, że scrcpy jest zainstalowane i dostępne w PATH.\n"
-                    "Pobierz z: https://github.com/Genymobile/scrcpy\n\n"
-                    "Na Ubuntu/Debian: sudo apt install scrcpy\n"
-                    "Na Fedora: sudo dnf install scrcpy\n"
-                    "Na Arch: sudo pacman -S scrcpy"
+                    "Scrcpy not found!\n\n"
+                    "Make sure scrcpy is installed and available in PATH.\n"
+                    "Download from: https://github.com/Genymobile/scrcpy\n\n"
+                    "On Ubuntu/Debian: sudo apt install scrcpy\n"
+                    "On Fedora: sudo dnf install scrcpy\n"
+                    "On Arch: sudo pacman -S scrcpy"
                 )
             return False
     
@@ -1211,9 +1357,9 @@ class ScrcpyLauncher(QMainWindow):
                 continue
         
         self.show_error(
-            "DroidCam nie znalezione!\n\n"
-            "Upewnij się, że DroidCam jest zainstalowane i dostępne w PATH.\n"
-            "Pobierz z: https://www.dev47apps.com/"
+            "DroidCam not found!\n\n"
+            "Make sure DroidCam is installed and available in PATH.\n"
+            "Download from: https://www.dev47apps.com/"
         )
         return False
     
@@ -1226,7 +1372,7 @@ class ScrcpyLauncher(QMainWindow):
         """
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Critical)
-        msg_box.setWindowTitle('Błąd')
+        msg_box.setWindowTitle('Error')
         msg_box.setText(message)
         msg_box.setStyleSheet("""
             QMessageBox {
