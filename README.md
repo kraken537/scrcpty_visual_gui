@@ -39,10 +39,9 @@ A user-friendly desktop application to launch and manage [Scrcpy](https://github
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/your-username/your-repository-name.git](https://github.com/your-username/your-repository-name.git)
-    cd your-repository-name
+    git clone https://github.com/kraken537/scrcpty_visual_gui.git
+    cd scrcpy_visual_gui
     ```
-    *(Replace `your-username/your-repository-name` with your actual GitHub repository details)*
 
 2.  **Install Python dependencies:**
     ```bash
