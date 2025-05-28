@@ -39,7 +39,7 @@ A user-friendly desktop application to launch and manage [Scrcpy](https://github
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/kraken537/scrcpty_visual_gui.git
+    git clone https://github.com/kraken537/scrcpy_visual_gui.git
     cd scrcpy_visual_gui
     ```
 
