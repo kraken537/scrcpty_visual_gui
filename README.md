@@ -106,4 +106,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-Crafted with ❤️ by [Your Name/GitHub Username]
+Crafted with ❤️ by Kuzyn
