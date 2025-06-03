@@ -3,9 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A user-friendly desktop application to launch and manage [Scrcpy](https://github.com/Genymobile/scrcpy) for Android screen mirroring and [DroidCam](https://www.dev47apps.com/) for using your phone as a webcam. This tool provides a convenient GUI to configure various options without needing to remember command-line arguments.
-
-![Scrcpy & DroidCam Launcher Screenshot](https://i.imgur.com/your-screenshot-url.png) 
-## ✨ Features
+ ✨ Features
 
 * **Scrcpy Launcher:**
     * Extensive GUI for most Scrcpy command-line options.
